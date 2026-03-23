@@ -1,6 +1,6 @@
 {
   "name": "openclaw-relay-connect-staging",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "description": "Connect your OpenClaw/KimiClaw to the relay server",
   "bin": {
     "openclaw-relay-connect-staging": "bin/run.js"
