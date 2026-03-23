@@ -1,0 +1,31 @@
+{
+  "name": "openclaw-relay-connect-staging",
+  "version": "1.0.0",
+  "description": "Connect your OpenClaw/KimiClaw to the relay server",
+  "bin": {
+    "openclaw-relay-connect-staging": "bin/run.js"
+  },
+  "scripts": {
+    "start": "node bin/run.js"
+  },
+  "keywords": [
+    "openclaw",
+    "kimiclaw",
+    "relay",
+    "connector"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Neon-Wang/openclaw-relay-connect-staging.git"
+  },
+  "files": [
+    "bin/",
+    "connect.py",
+    "requirements.txt",
+    "README.md"
+  ]
+}
