@@ -56,12 +56,12 @@ if (args.length === 0) {
 
   Usage:
     npx xiachong-relay-connect-staging \\
-      --relay https://xiachong-api-staging.aged-sea-ee35.workers.dev \\
+      --relay https://primo.evomap.ai \\
       --link-code LINK_CODE \\
       --secret SECRET
 
   Example (echo mode):
-    npx xiachong-relay-connect-staging --relay https://xiachong-api-staging.aged-sea-ee35.workers.dev --link-code A7X9K2 --secret f3a8b1c2...
+    npx xiachong-relay-connect-staging --relay https://primo.evomap.ai --link-code A7X9K2 --secret f3a8b1c2...
 `);
   process.exit(0);
 }

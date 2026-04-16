@@ -61,25 +61,65 @@ XiaChong Relay Connector (Secure Channel Worker) — Staging
 
 用法:
     python3 -u connect.py \\
-        --relay https://xiachong-api-staging.aged-sea-ee35.workers.dev \\
+        --relay https://primo.evomap.ai \\
         --link-code A7X9K2 \\
         --secret f3a8b1c2d4e5
 """
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
+import sys
 import uuid
+from pathlib import Path
 
-import requests
-import websockets
+# ── 依赖检查：友好报错而非 traceback ──────────────────────────────────────
+_missing_deps = []
+try:
+    import requests
+except ImportError:
+    _missing_deps.append("requests")
+try:
+    import websockets
+except ImportError:
+    _missing_deps.append("websockets")
+
+if _missing_deps:
+    print("=" * 60)
+    print("  [!] 缺少 Python 依赖:", ", ".join(_missing_deps))
+    print("=" * 60)
+    print()
+    print("请根据你的系统选择以下任一方式安装：")
+    print()
+    print("  # 方式 1: 用户级安装（推荐，无需 sudo）")
+    print(f"  pip3 install --user {' '.join(_missing_deps)}")
+    print()
+    print("  # 方式 2: 系统级安装（可能需要 sudo）")
+    print(f"  pip3 install {' '.join(_missing_deps)}")
+    print()
+    print("  # 方式 3: 如果遇到 'externally-managed-environment' 错误")
+    print(f"  pip3 install --break-system-packages {' '.join(_missing_deps)}")
+    print()
+    print("安装完成后重新运行本脚本即可。")
+    sys.exit(1)
 
 MAX_MESSAGE_LENGTH = 50000
-OPENCLAW_CLI = os.getenv("OPENCLAW_CLI", "openclaw")
+
+# ── OPENCLAW_CLI 环境变量校验 ─────────────────────────────────────────────
+# 某些环境下可能被污染为 "1" 等无效值，此处做防御性处理
+_env_cli = os.getenv("OPENCLAW_CLI", "").strip()
+if _env_cli and shutil.which(_env_cli):
+    OPENCLAW_CLI = _env_cli
+else:
+    # 环境变量无效或未设置，回退到默认值
+    OPENCLAW_CLI = "openclaw"
 DEFAULT_SESSION_LABEL = os.getenv("OPENCLAW_SESSION_LABEL", "mobile-app")
+DEFAULT_AGENT_FILE = os.path.expanduser("~/.config/xiachong/agent.json")
 VALID_EMOTIONS = {"speechless", "angry", "shy", "sad", "happy", "neutral"}
 
 EMOTION_PROMPT = (
@@ -95,10 +135,45 @@ EMOTION_PROMPT = (
 )
 
 
-def do_link(relay_url: str, link_code: str, secret: str) -> dict:
+def load_agent_file(path: str) -> dict | None:
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+def save_agent_file(path: str, agent_token: str, agent_id: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"agent_token": agent_token, "agent_id": agent_id}, f, indent=2)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    print(f"[OK] Agent 凭证已保存: {path}")
+
+def do_agent_auth(relay_url: str, agent_token: str) -> dict:
+    res = requests.post(
+        f"{relay_url}/api/agent-auth",
+        json={"agent_token": agent_token},
+        timeout=10,
+    )
+    if not res.ok:
+        try:
+            body = res.json()
+            detail = body.get("error") or body.get("detail") or res.text
+        except Exception:
+            detail = res.text
+        raise Exception(f"Agent 认证失败: {detail}")
+    return res.json()
+
+def do_link(relay_url: str, link_code: str, secret: str, agent_token: str | None = None) -> dict:
+    payload = {"link_code": link_code, "secret": secret}
+    if agent_token:
+        payload["agent_token"] = agent_token
     res = requests.post(
         f"{relay_url}/api/link",
-        json={"link_code": link_code, "secret": secret},
+        json=payload,
         timeout=10,
     )
     if not res.ok:
@@ -237,12 +312,32 @@ def parse_reply(raw: str) -> tuple[str, str, str]:
     return "neutral", text, _truncate(text)
 
 
-async def run(relay_url: str, link_code: str, secret: str, label: str):
-    print(f"[*] 绑定到中转服务器: {relay_url}")
-    result = do_link(relay_url, link_code, secret)
-    token = result["token"]
-    app_id = result["app_id"]
-    print(f"[OK] 绑定成功，App ID: {app_id}")
+async def run(relay_url: str, link_code: str, secret: str, label: str, agent_file: str):
+    # Dual-mode auth: try agent_token first, fall back to link_code pairing
+    agent_data = load_agent_file(agent_file)
+
+    if agent_data and agent_data.get("agent_token"):
+        print(f"[*] 使用已保存的 Agent Token 认证...")
+        try:
+            result = do_agent_auth(relay_url, agent_data["agent_token"])
+            token = result["token"]
+            app_id = result["app_id"]
+            agent_id = result.get("agent_id", agent_data.get("agent_id", ""))
+            print(f"[OK] Agent 认证成功，Agent ID: {agent_id}")
+        except Exception as e:
+            print(f"[!] Agent Token 认证失败: {e}")
+            print(f"[!] 回退到 Link Code 配对模式...")
+            agent_data = None
+
+    if not agent_data or not agent_data.get("agent_token"):
+        print(f"[*] 首次配对，绑定到中转服务器: {relay_url}")
+        agent_token = secrets.token_hex(32)
+        result = do_link(relay_url, link_code, secret, agent_token=agent_token)
+        token = result["token"]
+        app_id = result["app_id"]
+        agent_id = result.get("agent_id", "")
+        save_agent_file(agent_file, agent_token, agent_id)
+        print(f"[OK] 配对成功，App ID: {app_id}, Agent ID: {agent_id}")
 
     cli_path = shutil.which(OPENCLAW_CLI)
     if cli_path:
@@ -304,6 +399,39 @@ async def run(relay_url: str, link_code: str, secret: str, label: str):
                         await relay_ws.send(json.dumps({"type": "pong"}))
                         continue
 
+                    if msg_type == "init_request":
+                        async def handle_init(ws, init_msg):
+                            agent_id = init_msg.get("agent_id", "")
+                            prompts = init_msg.get("prompts", [])
+                            init_label = f"init-{agent_id}"
+                            print(f"[*] Soul init 开始: {agent_id} ({len(prompts)} 步)")
+                            for prompt_item in prompts:
+                                step = prompt_item.get("step", 0)
+                                prompt_text = prompt_item.get("prompt", "")
+                                expect = prompt_item.get("expect", "")
+                                if not prompt_text:
+                                    continue
+                                print(f"[*] Init step {step}: {expect}")
+                                raw_reply = await call_openclaw_cli(prompt_text, label=init_label)
+                                clean_reply = strip_thinking(raw_reply)
+                                try:
+                                    await ws.send(json.dumps({
+                                        "type": "init_response",
+                                        "agent_id": agent_id,
+                                        "step": step,
+                                        "expect": expect,
+                                        "content": clean_reply,
+                                    }))
+                                    print(f"[OK] Init step {step} 完成: {clean_reply[:80]}...")
+                                except websockets.ConnectionClosed:
+                                    print(f"[!] Init step {step} 发送失败: 连接已断开")
+                                    break
+                            print(f"[OK] Soul init 完成: {agent_id}")
+                        task = asyncio.create_task(handle_init(relay_ws, msg))
+                        pending_tasks.add(task)
+                        task.add_done_callback(pending_tasks.discard)
+                        continue
+
                     if msg_type == "message":
                         content = msg.get("content", "")
                         sender = msg.get("from", "unknown")
@@ -330,6 +458,8 @@ def main():
     parser.add_argument("--secret", required=True, help="客户端给的 Secret")
     parser.add_argument("--label", default=DEFAULT_SESSION_LABEL,
                         help=f"OpenClaw 会话标签，用于隔离上下文（默认: {DEFAULT_SESSION_LABEL}）")
+    parser.add_argument("--agent-file", default=DEFAULT_AGENT_FILE,
+                        help=f"Agent 凭证文件路径（默认: {DEFAULT_AGENT_FILE}）")
     args = parser.parse_args()
 
     print("=" * 50)
@@ -338,10 +468,11 @@ def main():
     print(f"  中转服务器: {args.relay}")
     print(f"  Link Code:  {args.link_code}")
     print(f"  会话标签:   {args.label}")
+    print(f"  Agent 文件: {args.agent_file}")
     print(f"  模式:       CLI (安全隔离)")
     print("=" * 50 + "\n")
 
-    asyncio.run(run(args.relay, args.link_code, args.secret, args.label))
+    asyncio.run(run(args.relay, args.link_code, args.secret, args.label, args.agent_file))
 
 
 if __name__ == "__main__":
